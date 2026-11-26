@@ -331,7 +331,14 @@ re-selection, unsupported touch and decoder limits.
 Record reproducible commands, versions, pipeline caps/properties and measurements in a companion findings document.
 Throwaway code is not merged into the product. Proceed only after these outcomes are recorded:
 
-1. A real VIRTUAL monitor is created, rendered and removed on close; MONITOR capture also works.
+**Status 2026-11-26: partial, decision `revise`.** Items 1 and 3 (software encode, plain playback) are proven and
+recorded in `2026-11-26-linux-extended-display-spike-findings.md`. Items 2, 4, 5, 6 and 7 need the code that PRs 1–4
+build, so they are verified inside those PRs instead of before them. Item 2's pinned panel playback gates PR 3, Wi-Fi
+and latency gate PR 6, and item 7 gates PR 5.
+
+1. A real VIRTUAL monitor is created, rendered and removed on close; MONITOR capture also works. **VIRTUAL: done.
+   MONITOR: not yet.**
+
 2. H.264 fragmented MP4 plays inside the target phone's actual panel through pinned, authenticated native transport
    over both USB and Wi-Fi. Measure bridge overhead; a desktop browser or standalone player is insufficient proof.
 3. Hardware encode meets the 1080p30 median ≤300 ms target under recorded conditions. Demonstrate a working
@@ -345,6 +352,10 @@ Throwaway code is not merged into the product. Proceed only after these outcomes
 
 If items 1–6 fail, revise the spec before product implementation; do not substitute a separate player, MJPEG or
 unreviewed transport. Permission persistence limitations must be surfaced for review rather than hidden.
+
+Two facts from the spike are now requirements: the capture is **damage-driven** (an idle desktop sends no frames, so a
+heartbeat is mandatory), and `persist_mode` crashes `xdg-desktop-portal-kde` on Plasma 6.7 (ship without it and ask
+each session). `vah264enc` must be probed, never assumed: with only `openh264enc`, 1080p30 costs a full core.
 
 ### Incremental PRs after approval
 
