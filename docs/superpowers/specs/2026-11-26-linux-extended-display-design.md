@@ -12,7 +12,9 @@ The feature uses the existing app, pairing and USB / Wi-Fi / Tailscale routes.
 
 KDE's ScreenCast portal advertises a `VIRTUAL` source, so the proposed path needs capture, encoding and transport
 rather than a new display driver. Portal availability alone does not prove that the complete feature works.
-The spike must demonstrate the authenticated path inside the actual Android WebView.
+The desktop/Chrome spike is recorded in [the findings](2026-11-26-linux-extended-display-spike-findings.md).
+Authenticated playback inside the actual Android WebView remains a gate for the widget milestone, not a prerequisite
+for building the transport that makes that test possible.
 
 ## 2. Goals, non-goals and boundaries
 
@@ -26,7 +28,8 @@ The spike must demonstrate the authenticated path inside the actual Android WebV
 - **G5 Quality.** 1080p30, 8 Mbit/s, hardware H.264 where available. Target median glass-to-glass latency ≤300 ms
   under the measured normal USB and Wi-Fi conditions. Software H.264 and 15 fps are documented lower-quality modes.
 - **G6 Lifecycle.** Capture is requested only while visible. Explicit close stops immediately; an unresponsive
-  viewer is stopped within 10 seconds. Persist portal selection when granted, without promising permanent approval.
+  viewer is stopped within 10 seconds. V1 asks for portal consent on each new session; persistence is deferred because
+  the spike crashed the installed KDE portal when requesting it.
 - **G7 Portability.** Other platforms and unsupported sessions show a reason; saved layouts remain portable.
 
 V1 excludes Windows, macOS, GNOME, X11 and wlroots support; more than one active screen per phone; more than two
@@ -40,8 +43,9 @@ phone. Existing ydotool installation does not establish a working absolute-point
 
 ## 3. Evidence and assumptions
 
-The original draft records this target-machine inventory on 2026-11-26. Treat it as a starting point to reproduce
-in the spike, not evidence that the proposed pipeline has already run:
+The [spike findings](2026-11-26-linux-extended-display-spike-findings.md), committed in `97ff33d`, record this
+target-machine inventory and successful virtual-display/software-encode/plain-Chrome playback on 2026-11-26.
+They do not establish pinned app playback, Wi-Fi, glass-to-glass latency, congestion recovery or input support:
 
 - Fedora 44, KDE Plasma / KWin 6.7.4, Wayland, two 1920×1080 monitors.
 - ScreenCast portal version 5, `AvailableSourceTypes = 7`; RemoteDesktop version 2.
@@ -100,8 +104,8 @@ contains it. The first start explains that sharing approval happens on the compu
 | `cursor` | Cursor | select | `embedded` | `embedded` or `hidden`, checked against advertised modes |
 
 Video always uses `contain`; no crop option. Mirror capture is scaled down to fit within 1920×1080 while preserving
-aspect ratio. The portal selects the physical monitor; “Choose monitor again” clears that selection's restore token
-and restarts through the dialog. No monitor identifiers or output names are accepted from the phone.
+aspect ratio. The portal selects the physical monitor; “Choose monitor again” closes the current mirror session
+and restarts through the dialog. V1 stores no selection token. No monitor identifiers or output names are accepted from the phone.
 
 States: starting, needs approval, no helper, no encoder, live, paused, busy, unsupported, denied and lost. Reasons
 are fixed codes localized by the panel. A lock indicates control is off; “Pointer control unavailable” explains a
@@ -131,8 +135,8 @@ remain native. Switching computers or routes closes the old connection before op
 Native code delivers text events and base64 binary chunks through main-frame callbacks. Each callback carries
 viewer handle, epoch and sequence; a closed/replaced viewer ignores stale callbacks. Base64 is a transport detail,
 not a native player. Limit a chunk to 256 KiB, split larger mux output, and allow at most 512 KiB of unacknowledged
-binary data across the native-to-JS bridge. The spike must measure its copying overhead and throughput at 8 Mbit/s.
-If this fails the target, revise this boundary before implementation; do not expose pairing secrets to WebView.
+binary data across the native-to-JS bridge. The native-transport/widget milestones must measure copying overhead and throughput at 8 Mbit/s.
+If this fails the target, revise this boundary before that surface ships; do not expose pairing secrets to WebView.
 
 The web demo supplies a fake bridge. Without a native screen bridge, the widget displays unsupported. A direct
 browser WebSocket path is outside v1.
@@ -149,10 +153,10 @@ Use a private 0700 runtime directory and 0600 Unix socket; remove both on teardo
 `[kind: u8][length: u32 big-endian][payload]`. JSON is kind 1 (≤64 KiB); video is kind 2 (≤256 KiB). Reject unknown
 kinds, oversized or truncated frames. The helper has no LAN listener.
 
-- Commands: `start{mode,fps,bitrate,cursor,control,restore_token}`, `resetMedia{epoch}`, `stop`,
+- Commands: `start{mode,fps,bitrate,cursor,control}`, `resetMedia{epoch}`, `stop`,
   `pointer{x,y}`, `button{n,down}`, `scroll{dx,dy}`, `releaseAll`.
-- Events: `permission{restore_token}`, `ready{width,height,codec,inputAvailable}`, `media{epoch}`,
-  `error{code}`, `stats{fps,bitrate}`. `permission` is agent-only and must never be forwarded to the phone.
+- Events: `ready{width,height,codec,inputAvailable}`, `media{epoch}`, `error{code}`, `stats{fps,bitrate}`.
+  V1 neither requests, stores nor forwards restore tokens; unexpected token fields are discarded.
 - Video payload begins with epoch (u32) and sequence (u32), followed by an ordered slice of fragmented MP4.
   A media event precedes each epoch. Each epoch starts with the MP4 initialization segment, followed by media
   beginning at a decodable keyframe. Chunk boundaries need not match MP4 box boundaries.
@@ -160,12 +164,13 @@ kinds, oversized or truncated frames. The helper has no LAN listener.
 Portal calls, with each asynchronous Request response awaited before the next dependent call:
 
 1. Check session, source and cursor capabilities. With `control=false`, create a ScreenCast session.
-2. With `control=true`, create a RemoteDesktop session and call `RemoteDesktop.SelectDevices(types=POINTER,
-   persist_mode=2, restore_token=...)`. Do not request keyboard or touchscreen devices.
+2. With `control=true` and the input gate passed, create a RemoteDesktop session and call
+   `RemoteDesktop.SelectDevices(types=POINTER)`. Do not request keyboard or touchscreen devices.
 3. Call `ScreenCast.SelectSources(types=VIRTUAL or MONITOR, multiple=false, cursor_mode=...)` with that session.
-   For capture-only sessions, put persistence options here. Combined sessions use persistence only in SelectDevices.
+   Omit `persist_mode` and `restore_token` on both interfaces in v1; capability/version advertisement does not
+   override the observed portal crash. Do not probe persistence automatically against a running desktop.
 4. Call Start on the owning interface (ScreenCast for capture-only, RemoteDesktop for combined). Validate returned
-   source and granted devices. Emit any replacement restore token immediately for storage, before encoder startup.
+   source and granted devices. Each new session requires consent; a media reset within a live session does not.
 5. Call `ScreenCast.OpenPipeWireRemote`, retain the returned FD and select the returned stream node. Resolve the
    negotiated video dimensions from PipeWire/GStreamer caps, not assumed portal metadata.
 6. Observe Session.Closed. On stop, release held input, stop the pipeline, close the portal session and PipeWire FD,
@@ -185,30 +190,44 @@ pipewiresrc (portal FD + node) → convert / scale / rate limit
 Negotiate an H.264 profile/level supported by the target WebView and encoder. Disable frame reordering, target a
 keyframe at least every second, and target 100 ms fragments. Report the actual RFC 6381 codec string in ready.
 Keep raw-frame queues bounded and drop old raw frames before encoding. Do not discard arbitrary encoded chunks.
-Encoder fallback occurs within the same portal session and creates a new media epoch.
+Encoder fallback occurs within the same portal session and creates a new media epoch. For the observed
+`openh264enc`, use `rate-control=bitrate` and `gop-size=<fps>` rather than VAAPI-specific property names; the spike
+produced Constrained Baseline level 4.0 (`avc1.42C028`), but report negotiated caps rather than hardcoding the codec.
+Keep post-encode appsink/socket delivery lossless within the bounded recovery policy. The throwaway spike’s
+`appsink drop=true` and live-edge seeking are not proof of safe product congestion handling.
 
-### 5.4 Ownership, tokens and lifecycle
+KWin capture is damage-driven. Emit helper stats every two seconds on a timer independent of frame callbacks.
+An idle desktop may legitimately emit no video for longer than the heartbeat deadline: retain the last image and
+keep the session live while viewer heartbeats and helper health messages arrive. Apply send timeouts only to
+pending writes, never to the interval between video chunks. No frame-arrival watchdog may restart an idle desktop.
+
+### 5.4 Ownership, consent and lifecycle
 
 `ScreenFeeds` owns at most one active viewer/helper per device, and at most two globally. Its identity includes the
 device, widget key and selection scope `(mode, control)`. Another widget from that device receives busy while one
 owns the screen; page transitions close the old viewer first and Retry can acquire the released slot. Reconnecting
 the same widget supersedes its previous connection atomically; stale close callbacks cannot stop the replacement.
 
-Persist restore tokens privately by `(device, mode, control)`. Multiple widgets may reuse a selection sequentially,
-but cannot consume its token concurrently. Serialize starts for each device. Mark a token consumed before handing
-it to the helper; atomically save its replacement when received. A crash between consumption and replacement can
-require another dialog. Missing/revoked tokens prompt normally. Never reuse a capture-only token for input or an
-extend token for mirror. “Choose monitor again” is an enumerated action scoped to the active mirror selection.
+V1 has no restore-token store and does not request persistence. Serialize session starts per device, ask for consent
+on each new session, and never automatically reopen a portal dialog after helper/portal failure. “Choose monitor
+again” is an enumerated action scoped to the active mirror viewer; it closes and reopens the session with consent.
 
+Future persistence requires a separate reviewed change with evidence that the portal no longer crashes. That change
+must scope tokens by `(device, mode, control)`, consume them durably before use and save replacements atomically;
+combined-session persistence belongs in SelectDevices, capture-only persistence in SelectSources.
 Close immediately on hide, Stop, destruction, route/computer change or unexpected WebSocket close. The sole
 exception is an explicitly coordinated media-recovery reconnect in §5.5. While visible, send a
 heartbeat every two seconds; ten seconds without one tears down the helper and releases the slot, including a
 pending approval dialog. Do not apply the camera's last-HTTP-request timer to this persistent connection. Observe
 configuration saves: widget removal, disabled page or mode/control changes invalidate the active session immediately.
+Track helper stats separately: six seconds without helper health marks capture lost and closes it, even when viewer
+heartbeats continue. Healthy stats with no video means idle, not lost; health emission also runs during approval.
 
-Agent restart ends all sessions; no live session survives it. A visible widget may reconnect using stored selection.
-Unexpected helper failure retries after 1, 2, 4, 8 and then 30 seconds while still visible. Denial, unsupported decode,
-missing dependencies and unsupported capabilities wait for Retry. No retry loop may repeatedly open approval dialogs.
+Agent restart ends all sessions; no live session survives it. A visible widget reports lost and offers Retry, which
+starts a fresh session and consent dialog. Transport recovery within an already-live portal session remains automatic.
+Helper/portal loss, denial, unsupported decode, missing dependencies and unsupported capabilities wait for Retry.
+Bounded transport retries (1, 2, 4, 8 and then 30 seconds while visible) must never create a new portal session or
+repeated approval dialogs. If a live session cannot be retained, stop and require Retry.
 Session cleanup also runs on agent shutdown and failed startup; a helper must exit if its agent socket disappears.
 
 ### 5.5 Relay, MSE and congestion recovery
@@ -252,7 +271,7 @@ bars. Account for source aspect ratio and negotiated dimensions; a rotated phone
 not the desktop's coordinate space. Portal absolute calls use the selected stream ID and its documented logical
 coordinate space. Video dimensions must not be substituted for logical dimensions on scaled outputs.
 
-Input requires both granted pointer permission and a validated mapping for that source. The spike must establish
+Input requires both granted pointer permission and a validated mapping for that source. The input milestone must establish
 how logical extents are obtained on the installed KDE, including virtual streams with missing position/size metadata.
 If extents cannot be established or #2077 prevents absolute input, show control unavailable and send no input.
 Do not guess virtual-output desktop coordinates from optional portal metadata. ydotool absolute fallback is deferred;
@@ -270,11 +289,11 @@ second finger cancels pending tap/long-press handling before scroll. Unit-test t
 | Another screen owns this phone or global limit reached | busy; Retry |
 | Portal approval pending | needs approval; hide/Stop cancels it |
 | User denied or cancelled | denied; explicit Retry |
-| Token cannot restore selection | needs approval; no silent source substitution |
+| New session or reselection | needs approval each time; no stored token in v1 |
 | Missing Python/Gio/Gst or usable encoder | no helper / no encoder; documented install instructions |
 | Decoder/profile/MSE failure | unsupported decoder; close capture; Retry |
 | Input unavailable | live video with control unavailable |
-| Helper/portal/output lost | lost; bounded retry only while visible |
+| Helper/portal/output lost | lost; explicit Retry starts a new consent dialog |
 | Repeated congestion | connection too slow; stopped until Retry |
 
 ### 5.8 Packaging, privacy and documentation
@@ -284,8 +303,9 @@ verify names for each supported distro. Missing optional dependencies must not p
 Android transport changes require the normal lint/build checks and API 21 compatibility. No new Android permission
 is expected. Keep the widget on every platform for layout portability.
 
-Tokens are local secrets, excluded from `ToPublic()`, phone events, logs and demo fixtures. Store them with the
-existing config's owner-only protections; remove records when a device is removed. Document that mirror mode sends
+V1 adds no token storage. Discard unexpected portal tokens and exclude them from `ToPublic()`, phone events, logs
+and demo fixtures. A later persistence change must use owner-only storage and remove records with the device. Document that mirror
+mode sends
 selected desktop content to the paired phone. No new external service is introduced; check existing privacy wording
 for accuracy about desktop streaming even though no new outbound host row is required.
 
@@ -296,7 +316,7 @@ re-selection, unsupported touch and decoder limits.
 ### 5.9 Verification
 
 - C#: device/widget gating; config revocation during an open socket; one-session ownership; two-session cap;
-  token consumption/replacement and crash windows; heartbeat expiry; frame limits; restart backoff; secret filtering;
+  absence of persistence options/token storage; heartbeat expiry; idle-desktop health; frame limits; transport retry; secret filtering;
   queue overflow and epoch recovery; releaseAll on every teardown path.
 - Fake helper: protocol events, fragmented MP4 fixture, delayed/truncated frames, crashes and input echoes. CI must
   not need a real portal. A colour-pattern message alone does not test MSE decoding.
@@ -313,11 +333,11 @@ re-selection, unsupported touch and decoder limits.
 
 ## 6. Remaining risks and decisions
 
-- **Portal input:** video is the baseline. Absolute control ships only for mappings proven by the spike; no guessed
+- **Portal input:** video is the baseline. Absolute control ships only for mappings proven in the input milestone; no guessed
   ydotool fallback. Input failure does not block display-only release.
 - **Phone decode and bridge throughput:** an unsupported phone has a clear state. If the intended target phone
   fails MSE or transport feasibility, stop and revise the design rather than silently adding a native decoder.
-- **Output identity/placement:** restored selection does not itself prove stable virtual-output placement. Test
+- **Output identity/placement:** the spike observed placement once, not stable placement across sessions. Test
   repeated close/reopen on KDE; document re-arrangement if placement is not retained. No automatic placement API.
 - **Visibility churn:** closing a virtual monitor can move desktop windows. Immediate explicit close is intentional;
   document this behavior and measure it during page switching. The ten-second deadline is for dead viewers only.
@@ -326,47 +346,36 @@ re-selection, unsupported touch and decoder limits.
 
 ## 7. Feasibility gate and rollout
 
-### Spike (timebox 1–2 days; throwaway implementation)
+### Completed desktop spike and remaining gates
 
-Record reproducible commands, versions, pipeline caps/properties and measurements in a companion findings document.
-Throwaway code is not merged into the product. Proceed only after these outcomes are recorded:
+The [findings](2026-11-26-linux-extended-display-spike-findings.md) record decision **revise**. The desktop path is
+feasible: a real 1920×1080 virtual output, automatic removal on session close, and continuous software H.264 playback
+in phone Chrome over plain HTTP/USB were observed. Neither mirror capture nor hardware encode, 15 fps operation,
+pinned app playback, Wi-Fi, actual latency, congestion recovery or touch has been established. Buffer-ahead
+0.15–0.53 s is not a glass-to-glass measurement or a proof that the ≤300 ms target was met.
 
-**Status 2026-11-26: partial, decision `revise`.** Items 1 and 3 (software encode, plain playback) are proven and
-recorded in `2026-11-26-linux-extended-display-spike-findings.md`. Items 2, 4, 5, 6 and 7 need the code that PRs 1–4
-build, so they are verified inside those PRs instead of before them. Item 2's pinned panel playback gates PR 3, Wi-Fi
-and latency gate PR 6, and item 7 gates PR 5.
+Retained implementation may now build the missing measurement surfaces. The implementation milestones below are
+not GitHub PR numbers (the existing documentation is in PR #1). Each milestone must meet its gate before release of
+that surface. Failure stops that surface for correction or spec revision, not unrelated foundational work.
 
-1. A real VIRTUAL monitor is created, rendered and removed on close; MONITOR capture also works. **VIRTUAL: done.
-   MONITOR: not yet.**
+| Implementation milestone | Tasks in plan | Gate before that surface ships |
+|---|---|---|
+| 1. Helper foundation | 1–6 | Protocol/process tests; real VIRTUAL start/close; no persistence options; idle desktop remains healthy; no public endpoint |
+| 2. Endpoint and pinned native bridge | 7–9 | Synthetic-media USB/Wi-Fi transport; pin/key/bridge-key rejection; bounded delivery; route switch and cleanup |
+| 3. Mirror widget and MSE | 10–11 | Real MONITOR stream inside the actual app over pinned USB; real codec decode; bounded callbacks; idle display and slow-consumer recovery; demo/docs/counts |
+| 4. Extend widget | 12 | Real VIRTUAL stream inside the app; consent on every new session; placement and lifecycle matrix; working 15 fps software mode |
+| 5. Optional pointer | 13 | Granted device and proven logical mapping on scaled/rotated sources, including #2077; otherwise display-only |
+| 6. Release verification | 14 | Real app Wi-Fi capture; ten-minute USB/Wi-Fi thermal and glass-to-glass measurements; throttling recovery; packaging/dependency/docs checks |
 
-2. H.264 fragmented MP4 plays inside the target phone's actual panel through pinned, authenticated native transport
-   over both USB and Wi-Fi. Measure bridge overhead; a desktop browser or standalone player is insufficient proof.
-3. Hardware encode meets the 1080p30 median ≤300 ms target under recorded conditions. Demonstrate a working
-   software/15 fps fallback and report its measured quality separately.
-4. Repeated starts consume/replace tokens correctly without repeated approval when the backend grants persistence;
-   separate mirror/extend and control scopes restore the intended selection. Record placement behavior.
-5. Backgrounding, disconnect and process death remove the output within the stated deadlines; denial never loops.
-6. Congestion either recovers within §5.9's bound or stops explicitly, without growing buffers.
-7. For touch, record granted devices and logical mapping, test HiDPI and virtual-source absolute input, including
-   #2077. If this fails, approve a display-only milestone and keep control unavailable.
+The ≤300 ms median remains a release target to measure, not an initial coding gate or an achieved result. Missing
+VAAPI is not a blocker: prefer a usable hardware encoder when present, then openh264enc, then x264enc. Offer the
+specified 10/15/30 fps choices and report the measured ~90% of one core for the spike's software 1080p30 run.
+A user-selectable lower-resolution mode is not specified in v1; add one only through an explicit spec change.
 
-If items 1–6 fail, revise the spec before product implementation; do not substitute a separate player, MJPEG or
-unreviewed transport. Permission persistence limitations must be surfaced for review rather than hidden.
-
-Two facts from the spike are now requirements: the capture is **damage-driven** (an idle desktop sends no frames, so a
-heartbeat is mandatory), and `persist_mode` crashes `xdg-desktop-portal-kde` on Plasma 6.7 (ship without it and ask
-each session). `vah264enc` must be probed, never assumed: with only `openh264enc`, 1080p30 costs a full core.
-
-### Incremental PRs after approval
-
-1. Helper protocol, fake helper, process ownership and cleanup tests; no reachable capture endpoint.
-2. Pinned native streaming bridge, agent endpoint and authorization, exercised with bounded synthetic media;
-   no screen capture without an authorized widget. Keep bridge and endpoint changes together where needed to test.
-3. Mirror widget, MSE lifecycle/congestion recovery, states, demo mock and initial docs/counts.
-4. Extend mode, selection-token persistence and lifecycle/placement verification.
-5. Proven absolute pointer support behind control, release handling and revocation tests. Omit this PR if the input
-   gate fails; display-only operation remains explicit in docs.
-6. Final hardware matrix, dependency setup and documentation. Each PR includes its own relevant tests and docs.
+Persistence is deferred from all six milestones. Do not ship a call that crashed the target portal merely to complete
+a token task. Health timers must be independent of frame delivery. The spike's dropping appsink/live-edge seeking
+must not replace the bounded, decodable recovery policy in §5.5. No separate player, MJPEG or unreviewed transport
+is introduced if a milestone fails.
 
 ## 8. Implementation latitude
 

@@ -8,17 +8,22 @@
 
 **Tech Stack:** Existing .NET 10 / ASP.NET Core / xUnit; Python 3 / PyGObject / Gio / GStreamer / PipeWire; Kotlin / Android API 21+ / existing pinned TLS; ES modules / MSE / Playwright. No additional runtime package is assumed beyond the optional Linux capture dependencies.
 
-**Spec:** [2026-11-26-linux-extended-display-design.md](../specs/2026-11-26-linux-extended-display-design.md). Read the entire spec before executing this plan. This document plans work; it does not record successful hardware experiments.
+**Spec:** [2026-11-26-linux-extended-display-design.md](../specs/2026-11-26-linux-extended-display-design.md). Read the entire spec and [spike findings](../specs/2026-11-26-linux-extended-display-spike-findings.md) before execution.
+Revision after `97ff33d`: desktop feasibility is established; app transport, Wi-Fi, actual latency, congestion and touch remain gated below.
 
 ## Global Constraints
 
 - “V1 excludes Windows, macOS, GNOME, X11 and wlroots support”; “more than one active screen per phone”; “more than two active sessions per agent”.
 - “output above 1080p or 30 fps”; “a native video decoder”; “MJPEG”; and “automatic output placement” are excluded.
 - “`control` defaults to false.” Video works without pointer permission; input requires granted permission and a validated logical mapping.
-- “Target median glass-to-glass latency ≤300 ms” at “1080p30, 8 Mbit/s” under recorded conditions.
+- “Target median glass-to-glass latency ≤300 ms” at “1080p30, 8 Mbit/s” remains a release measurement, not an achieved
+  spike result. Probe VAAPI; the observed working encoder is openh264enc (~90% of one core). Keep 15 fps available.
+- An unchanged desktop can stop emitting video indefinitely. Health timers/stats run independently of frame callbacks;
+  no-video alone never means a dead session. Preserve the last displayed frame.
 - “Explicit close stops immediately; an unresponsive viewer is stopped within 10 seconds.” Graceful helper shutdown has a two-second kill deadline.
 - “Limit a chunk to 256 KiB”; “512 KiB of unacknowledged binary data” on the Android bridge; agent unsent video ≤1 MiB; JS pending appends ≤512 KiB.
-- “Restore tokens are single-use and replaced on Start.” Scope them by `(device, mode, control)` and consume before use.
+- V1 omits `persist_mode` and `restore_token` on both portals and has no token store. Each new session needs approval;
+  persistence is a separate future change after the observed KDE crash is resolved.
 - “No monitor identifiers or output names are accepted from the phone.” No JavaScript credentials, hosts, ports, URLs, commands or capture pipeline options.
 - Chromium 83 compatibility; Android `minSdk = 21`; retain the existing pinned USB and Wi-Fi authentication model.
 - Follow CONTRIBUTING.md: feature issue first, reviewable PRs near 800 non-test changed lines, no CHANGELOG/version changes, widget registry/icon/count/demo/docs together.
@@ -26,14 +31,27 @@
 
 ## Execution order and review boundaries
 
-Task 0 blocks all retained implementation. After its evidence is reviewed, execute Tasks 1–6 (helper/session foundations),
-7–9 (endpoint plus pinned Android path), 10–12 (playback and working widget), 13 (optional proven touch), and 14 (release verification).
-The subsystem boundaries are connected parts of one feature, not independent products. Each task carries its own red/green test cycle.
-Group adjacent tasks into PRs only if they remain reviewable. Do not merge an endpoint without its authorization tests or
-register a widget without its demo/docs/count changes. Use inline execution unless the user explicitly chooses delegation.
+Task 0's reduced desktop gate is recorded in `97ff33d` with decision `revise`. Do not rerun or overwrite that evidence
+as if full app support had been demonstrated. Retained implementation can now create the surfaces needed for testing.
+Use these implementation milestones (not GitHub PR numbers; the existing docs are in PR #1):
 
-Before Task 0, inspect `git status --short`, current branch and applicable project guidance. At execution time, use the
-using-git-worktrees skill if isolation is needed. Keep pre-existing spec edits and other user changes intact.
+| Milestone | Tasks | Required evidence before that surface ships |
+|---|---|---|
+| 1. Helper foundations | 1–6 | Framing/process/lease tests; actual VIRTUAL teardown; no persistence; idle desktop healthy |
+| 2. Endpoint and pinned native transport | 7–9 | Synthetic media over pinned USB/Wi-Fi, invalid pin/key rejection, bounded bridge and route cleanup |
+| 3. Mirror widget in actual app | 10–11 | Real MONITOR playback over pinned USB, codec/MSE, slow consumer and static desktop; demo/docs/counts |
+| 4. Extend widget | 12 | Real VIRTUAL playback inside app, repeated session consent, placement/lifecycle and real 15 fps software operation |
+| 5. Optional pointer | 13 | Actual granted input and logical mapping on scaled/rotated sources, including #2077 |
+| 6. Release | 14 | Real app Wi-Fi capture, ten-minute USB/Wi-Fi latency/thermal data and throttling recovery |
+
+Each task keeps its red/green cycle; a missing later hardware measurement does not block unrelated foundation code.
+An unsuccessful milestone blocks release of that surface until corrected or the spec is revised. ≤300 ms is still a
+release target; capture tests at low-content bitrate do not establish throughput at the configured 8 Mbit/s.
+Do not merge an endpoint without authorization tests or register a widget without demo/docs/count changes.
+Use inline execution unless the user explicitly chooses delegation.
+
+Before Task 1, inspect `git status --short`, current branch and applicable guidance. At execution time, use the
+using-git-worktrees skill if isolation is needed. Keep existing spec/findings and other user changes intact.
 
 ## File and ownership map
 
@@ -44,8 +62,7 @@ New paths below are deliberate additions, not claims that these files already ex
 | `docs/superpowers/specs/2026-11-26-linux-extended-display-spike-findings.md` | Reproducible hardware evidence and go/no-go decision |
 | `agent/PhoneBox.Agent/ScreenProtocol.cs` | Limits, framed reader/writer, public versus private events |
 | `agent/PhoneBox.Agent/ScreenOptions.cs` | Normalize server-owned widget options and selection scope |
-| `agent/PhoneBox.Agent/ScreenTokenStore.cs` | Private atomic token consume/replace with generation checks |
-| `agent/PhoneBox.Agent/ScreenLease.cs` | Pure viewer ownership, heartbeat, retry and media epoch state |
+| `agent/PhoneBox.Agent/ScreenLease.cs` | Pure viewer ownership, heartbeat, transport retry and media epoch state |
 | `agent/PhoneBox.Agent/ScreenCast.cs` | Process/socket lifetime and helper adapter, runtime Linux guard |
 | `agent/PhoneBox.Agent/Linux/phonebox-screencast.py` | Portal request state machine, pipeline and input dispatch |
 | `agent/PhoneBox.Agent/ScreenFeeds.cs` | Device/widget authorization, two-session cap and orchestration |
@@ -91,44 +108,28 @@ Widget/viewer identity is fixed by the upgraded connection, so input messages ca
 
 Native `screenAck` releases local bridge credit; it is not another public WebSocket operation. `report` informs the
 agent of append progress and playback lag. Native supplies the JSON via the existing keyed `screenSend` wrapper.
-Helper permission events use `{type:"permission",restore_token}` and are consumed only by ScreenFeeds. Helper
-start/reset/stop/input commands follow spec §5.3. The agent obtains logical mapping from the helper without exposing
+V1 helper/public messages contain no restore token or persistence request. A received unknown/private token field
+is discarded and never logged. Helper start/reset/stop/input commands follow spec §5.3. The agent obtains logical mapping from the helper without exposing
 it as public state. Binary WebSocket messages contain Task 1 frames; native strips framing before base64 delivery.
 Epoch and sequence are unsigned 32-bit values; start a fresh session before either wraps. JavaScript viewer handles
 are positive safe integers, and native validates the same range before converting to Long.
 
-## Task 0: Prove the full target path before retained implementation
+## Task 0: Reduced desktop gate — evidence recorded
 
-**Files:** Create only the findings document listed above. Keep experiment source in an isolated temporary directory/worktree.
-**Consumes:** Spec §7, target Linux desktop and paired target phone.
-**Produces:** Recorded evidence for each gate; selected installed encoder properties/caps and codec; decision on touch eligibility.
+**Files:** Read `docs/superpowers/specs/2026-11-26-linux-extended-display-spike-findings.md` from `97ff33d`.
+**Consumes:** Recorded desktop/Chrome experiment, decision `revise` and the revised spec §7.
+**Produces:** Accepted starting evidence and explicit outstanding milestone gates, not a claim of full feature support.
 
-- [ ] Record date, distro, session, portal capabilities, Python imports, Gst plugin inspection, GPU/driver and Android/WebView versions.
-  Use read-only discovery first:
-  ```bash
-  printf '%s\n' "$XDG_SESSION_TYPE" "$XDG_CURRENT_DESKTOP"
-  gdbus introspect --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop
-  gst-inspect-1.0 pipewiresrc
-  gst-inspect-1.0 vah264enc
-  gst-inspect-1.0 x264enc
-  gst-inspect-1.0 mp4mux
-  python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gio, Gst; print(Gst.version_string())'
-  ```
-  Record missing capabilities rather than treating a failed inspection as proof that capture is impossible.
-- [ ] Build a throwaway combined desktop/Android experiment following spec §5.2–5.5. Use the actual panel asset origin,
-  a keyed native bridge, existing pin/key handling, and MSE. Request consent on the computer. Prove extend and mirror;
-  do not replace this test with desktop-browser playback or an unpinned LAN server.
-- [ ] Exercise ten start/stop cycles per selection scope, both routes, denial, app background/kill, unplug, helper death,
-  desktop restart and ten-second throttling. Record output removal time, token rotation and output placement.
-- [ ] Measure ten minutes per route at 1080p30/8 Mbit/s, latency median/p95, bridge byte counts/credit, CPU/GPU/memory,
-  software/15 fps fallback, and recovery ≤500 ms lag within five seconds or explicit stop. Test pointer logical mapping
-  on virtual and mirrored HiDPI outputs, rotation and negative desktop placement. Record #2077 behavior.
-- [ ] Write the findings with headings: Inventory, Reproduction, Pipeline/caps, USB results, Wi-Fi results, Lifecycle,
-  Persistence, Congestion, Input mapping, Decision. Every claimed pass links to a recorded measurement or transcript.
-  State `proceed`, `revise`, or `display-only`; failures in spec gate items 1–6 require a spec revision before Task 1.
-- [ ] Review the evidence with the user before retained implementation. Commit only the approved findings document:
-  `git add docs/superpowers/specs/2026-11-26-linux-extended-display-spike-findings.md`, then
-  `git commit -m "docs: record Linux screen feasibility results"`.
+- [x] Inventory and real 1920×1080 VIRTUAL output without root/driver, removed on session close, recorded in findings.
+- [x] Software openh264enc H.264 and continuous phone Chrome playback over plain HTTP/adb reverse recorded.
+  The recorded 0.15–0.53 s buffer-ahead is not glass-to-glass latency; no pinned app or Wi-Fi result is claimed.
+- [x] Damage-driven capture, the persist_mode crash and software CPU cost recorded as design constraints.
+- [ ] At implementation handoff, read the findings and this plan's milestone table. Leave MONITOR, pinned WebView,
+  Wi-Fi, lifecycle repetitions, congestion, real 15 fps, hardware encode, latency and touch marked unmeasured until
+  their milestone produces evidence. Do not repeat the crashing persistence experiment as an automatic capability probe.
+
+The recorded reduced gate permits Task 1 without another throwaway Android implementation. Product release remains conditional on the milestone evidence. The documented optional VAAPI path does not
+block use of the installed openh264enc path.
 
 ## Task 1: Define and test the framed media boundary
 
@@ -145,7 +146,8 @@ internal static class ScreenProtocol {
 ```
 `ReadAsync` returns null only for clean EOF before a header; truncation is InvalidDataException.
 Video's epoch/sequence header counts inside MaxVideo, so MP4 slices are at most MaxVideo minus eight bytes.
-JSON messages are UTF-8, strict known event/operation types. A `permission` event is never a public event.
+JSON messages are UTF-8, strict known event/operation types. V1 has no permission/token event; unexpected private
+fields must not enter the public event serializer.
 
 - [ ] Write the first regression:
   ```csharp
@@ -163,7 +165,7 @@ JSON messages are UTF-8, strict known event/operation types. A `permission` even
   with codec/digest/generation command in screen-fixture.json. Never record the desktop. Assert the fixture begins with valid
   init and media boxes and supports the spike's codec string.
 - [ ] Rerun focused tests. Copy fixtures to output using `None Update="Fixtures/**" CopyToOutputDirectory="PreserveNewest"`.
-  Add a whitelist serializer that strips permission/token events and test with a distinctive secret string.
+  Add a whitelist serializer that rejects unknown/private fields and test with a distinctive token-like secret string.
 - [ ] Commit the protocol, fixtures and tests: `feat: define bounded screen media protocol`.
 
 ## Task 2: Normalize options and define selection identity
@@ -197,9 +199,9 @@ retain the repo's enabled-widget consent rule and never borrow control from anot
 - [ ] Rerun tests; prove no conversion accepts arbitrary pipeline strings or throws on corrupt stored options.
 - [ ] Commit: `feat: normalize screen widget capture options`.
 
-## Task 3: Implement ownership and token storage as isolated state
+## Task 3: Implement viewer ownership and heartbeat state
 
-**Files:** Create `ScreenLease.cs`, `ScreenLeaseTests.cs`, `ScreenTokenStore.cs`, `ScreenTokenStoreTests.cs`.
+**Files:** Create `ScreenLease.cs`, `ScreenLeaseTests.cs`. No token-store or config-secret additions.
 **Interfaces:**
 ```csharp
 internal sealed class ScreenLease(string widgetKey, long viewer, long nowMs) {
@@ -210,19 +212,9 @@ internal sealed class ScreenLease(string widgetKey, long viewer, long nowMs) {
     public bool Replace(long expectedViewer, long replacementViewer, long nowMs);
     public bool Close(long viewer);
 }
-internal sealed record ScreenTokenLease(ScreenScope Scope, long Generation, string? Token);
-internal sealed class ScreenTokenStore(string path) {
-    public ScreenTokenLease Consume(ScreenScope scope);
-    public bool Replace(ScreenTokenLease lease, string token);
-    public void Clear(ScreenScope scope);
-    public void RemoveDevice(string device);
-}
 ```
-Consumed tokens are deleted durably before helper startup. Generation checks reject delayed permission events after replacement/clear.
-Use a private sidecar `Path.Combine(AppPaths.ConfigDir, "screen-tokens.json")` so token rotation cannot overwrite concurrent
-settings edits. This is internal secret metadata, not a new global setting or public config field. Use the same AppPaths
-owner-only protections, write a private temporary file, flush, atomically rename, and fail closed on persistence failure.
-The sidecar uses the spec’s existing-config owner-only protection requirement without adding token fields to editable settings; document its path in SETUP.
+Viewer heartbeat, helper health and video progress are separate signals. No video-arrival timestamp is used as a
+lease-expiry condition. Task 6 adds helper-health supervision; no runtime path touches restore-token storage.
 
 - [ ] Add deterministic tests, including:
   ```csharp
@@ -236,14 +228,13 @@ The sidecar uses the spec’s existing-config owner-only protection requirement 
       Assert.True(lease.Expired(19_000));
   }
   ```
-  Token tests use a disposable directory: reopen after Consume sees no reusable token; stale Replace fails;
-  mirror/extend and control scopes remain separate; Clear invalidates outstanding leases; another device is unaffected.
-- [ ] Run `dotnet test agent/PhoneBox.Agent.Tests --filter 'FullyQualifiedName~ScreenLeaseTests|FullyQualifiedName~ScreenTokenStoreTests'` and observe red.
-- [ ] Implement locking and durable token transitions. Handle a missing file as empty, corrupt storage as no restorable selection,
-  and an unwritable store as start failure before token reuse. Never include token values in exceptions/logs.
-- [ ] Verify tests, Unix file permissions, atomic replacement failure, concurrent Consume calls and agent restart.
-  A second Consume may yield no token; it must never yield the same token twice.
-- [ ] Commit: `feat: track screen viewer leases and private portal tokens`.
+  Add a test sending heartbeats for 60 seconds with zero video frames; it must remain live, while ten seconds
+  without viewer heartbeat expires even if the helper keeps emitting video.
+- [ ] Run `dotnet test agent/PhoneBox.Agent.Tests --filter FullyQualifiedName~ScreenLeaseTests` and observe red.
+- [ ] Implement serialized ownership changes, epoch counters and the heartbeat deadline. Retain connection-generation
+  guards defined in Task 6; a closed/replaced viewer cannot renew or close its replacement.
+- [ ] Rerun tests including exact deadline, delayed callback and zero-frame cases. No real timers/settings required.
+- [ ] Commit: `feat: track screen viewer leases independently of video frames`.
 
 ## Task 4: Build the portal helper state machine without an encoder
 
@@ -260,14 +251,15 @@ so unittest can import protocol/state code without installed capture libraries.
       bus = FakeBus()
       session = helper.PortalSession(bus, lambda event: None)
       session.start(dict(mode="mirror", control=False, fps=30, bitrate=8000000,
-                         cursor="embedded", restore_token=None))
+                         cursor="embedded"))
       bus.complete_create("/session/one")
       self.assertEqual(bus.calls[-1][0:2],
                        ("org.freedesktop.portal.ScreenCast", "SelectSources"))
   ```
   FakeBus.complete_create invokes the stored create callback with a successful session_handle result.
-  Add combined-session tests requiring SelectDevices before SelectSources, persistence on the correct interface,
-  granted-device checks, permission emission before encoding, denial without retry and cancellation during approval.
+  Assert every SelectSources/SelectDevices options dictionary omits persist_mode and restore_token. Add combined
+  tests requiring SelectDevices before SelectSources, granted-device checks, consent for each new session, denial
+  without retry and cancellation during approval. A media reset must not create another portal session.
 - [ ] Run `python3 -m unittest discover -s agent/PhoneBox.Agent.Tests -p 'test_screen_helper.py' -v`; confirm red without requiring gi.
 - [ ] Implement asynchronous Request response handling and Session.Closed observation. Subscribe before invoking requests
   to avoid fast-response races. Close outstanding request handles on cancellation. Validate source/cursor bits first;
@@ -284,11 +276,11 @@ internal interface IScreenRun : IAsyncDisposable {
     Task SendAsync(object command, CancellationToken ct);
 }
 internal delegate Task<IScreenRun> ScreenLauncher(
-    ScreenOptions options, ScreenTokenLease token,
+    ScreenOptions options,
     Func<ScreenFrame, Task> receive, CancellationToken ct);
 ```
 ScreenCast supplies `static Task<IScreenRun> StartAsync(string helperPath, string runtimeDirectory,
-ScreenOptions options, ScreenTokenLease token, Func<ScreenFrame, Task> receive, CancellationToken ct)`;
+ScreenOptions options, Func<ScreenFrame, Task> receive, CancellationToken ct)`;
 the production ScreenLauncher closes over the embedded helper path. Tests supply the fake helper path.
 Receive is ordered and may apply bounded backpressure.
 Use frame/event contracts from Tasks 1 and 4. The fake helper supports success, truncated output, stall and crash modes
@@ -315,9 +307,14 @@ selected by the test process argument; it does not open a portal.
   cancellation and kill-tree fallback. Runtime-guard Linux before probing/extraction. The shared net10.0 target also builds
   for macOS; do not compile out types that Program.cs references or infer runtime OS from the build host.
 - [ ] Add the Gst pipeline proven in Task 0: negotiated downscale, bounded leaky raw queue before encoding, low-latency
-  VAAPI with software fallback, H.264 codec from actual caps, fragmented MP4 appsink. Implement resetMedia by restarting
+  encoder probe order vah264enc → openh264enc → x264enc, H.264 codec from actual caps, fragmented MP4 appsink.
+  For the observed openh264enc use bitrate=8000000, complexity=1, rate-control=bitrate, gop-size=fps; do not send
+  VAAPI cbr/property names to it. Exercise 15 as well as 30 fps. Keep post-encode output lossless: never copy the
+  throwaway appsink drop=true or live-edge seeking as the product congestion policy. Implement resetMedia by restarting
   encoder/mux while retaining the portal and PipeWire session. Emit a new epoch then init and keyframe media. Add Python
-  fake-pipeline tests for fallback and cleanup; run the real pipeline on hardware only in the manual matrix.
+  fake-pipeline tests for fallback and cleanup. Add a helper health/stats timer every two seconds independent of
+  appsink callbacks; a fake source silent for 60 seconds must still emit health. Prove real VIRTUAL start/close
+  and idle capture in milestone 1, record evidence, and keep full transport/latency measurements in later gates.
 - [ ] Rerun ScreenCast/Python tests and `dotnet build agent/PhoneBox.Agent -f net10.0`.
   Commit: `feat: encode and supervise Linux screen capture`.
 
@@ -329,7 +326,7 @@ selected by the test process argument; it does not open a portal.
 internal sealed record ScreenViewer(string Device, string Widget, long Handle);
 internal sealed record ScreenConnection(ScreenViewer Viewer, long Generation);
 internal sealed record ScreenOpenResult(string State, ScreenConnection? Connection);
-// ScreenFeeds constructor accepts ConfigStore, ScreenTokenStore, ScreenLauncher and Func<long> nowMs.
+// ScreenFeeds constructor accepts ConfigStore, ScreenLauncher and Func<long> nowMs; no token store.
 // Internal methods; register the owning concrete service in DI:
 // Task<ScreenOpenResult> OpenAsync(ScreenViewer viewer, Func<ScreenFrame, Task> emit, CancellationToken ct)
 // Task CloseAsync(ScreenConnection connection)
@@ -348,7 +345,7 @@ insufficient to guard old socket callbacks. The helper media epoch is a third, s
   same widget replacement closes previous owner; third device is busy; hidden/removed widget cannot open.
   Use actual pages, PhoneConfig page selection and Smart Stack cards. No permission is borrowed from another widget.
   Define `ScreenFeedsTestRig.Create()` in ScreenFeedsTests.cs to create a temporary ConfigStore with phone-a and phone-b,
-  enabled widgets desk/screen and desk/other, in-memory token path, fake ScreenLauncher and writable NowMs clock.
+  enabled widgets desk/screen and desk/other, fake ScreenLauncher and writable NowMs clock.
   Expose `Feeds` and dispose it before deleting the directory. Use a completed callback for emitted frames:
   ```csharp
   [Fact]
@@ -364,12 +361,13 @@ insufficient to guard old socket callbacks. The helper media epoch is a third, s
   }
   ```
 - [ ] Run `dotnet test agent/PhoneBox.Agent.Tests --filter FullyQualifiedName~ScreenFeedsTests` and observe red.
-- [ ] Implement reserve/launch/recheck ownership, rollback after failed launch, heartbeat expiration, token consumption
-  before launch and immediate private permission-event persistence. Call SettingsSavedAsync after every successful
-  config save that can change pages/phones/options. Compare removed phone records and call RemoveDevice.
-  Do not log tokens or forward helper permission events. Cancel stale startup requests and approval dialogs.
-- [ ] Add fake-clock tests for ten-second expiry, shutdown disposal, 1/2/4/8/30-second crash retries, cancellation of retries
-  after hide and no automatic denied/missing-dependency retry. Config disable/control change must release input and close
+- [ ] Implement reserve/launch/recheck ownership, rollback after failed launch and independent viewer/helper health
+  checks. Track helper stats on its two-second timer; six seconds without helper health marks it lost, independently
+  of video. Do not kill a healthy helper for lack of frames. Call SettingsSavedAsync after config saves that can
+  change pages/phones/options. Cancel stale startup requests and approval dialogs; discard any unexpected token fields.
+- [ ] Add fake-clock tests for ten-second viewer expiry, six-second helper-health expiry, sixty-second no-frame
+  health, shutdown disposal, and transport-only retry delays 1/2/4/8/30 seconds. Helper/portal loss or denied/missing
+  dependency waits for explicit Retry to avoid repeated consent dialogs. Config disable/control change must release input and close
   capture before the next message can act. Rerun the focused suite and existing PanelWidgets/Camera tests.
 - [ ] Commit: `feat: own screen sessions by enabled phone widget`.
 
@@ -385,7 +383,7 @@ Use Task 1 binary framing inside each binary WebSocket message; reassemble fragm
 
 - [ ] Add endpoint tests using ASP.NET's existing DefaultHttpContext plus an injected IWebSocketFeature test peer; keep
   RequestGate tests separate so an endpoint-level pass is not mistaken for auth validation. Test invalid widget/device,
-  unsupported OS, malformed operations, body/message caps, foreign recovery handle, permission secret filtering and
+  unsupported OS, malformed operations, body/message caps, foreign recovery handle, private-field filtering and
   non-upgrade GET rejection. Extend existing gate/allow-list tests for bearer key, origin, USB and Wi-Fi behavior.
   Use an explicit 400 response for an authorized non-upgrade GET. A focused test creates DI with the fake ScreenFeeds
   rig and sets path/query/device headers on DefaultHttpContext before calling ScreenEndpoint.HandleAsync:
@@ -412,7 +410,8 @@ Use Task 1 binary framing inside each binary WebSocket message; reassemble fragm
   4 KiB, and reject NaN/infinity. Cursor/source changes require session restart.
 - [ ] Add a 1 MiB bounded unsent media queue with two-second send timeout. Recovery cancels old send/read loops,
   discards old queued data, retains the portal only after successful preparation, and atomically replaces the viewer
-  transport using ScreenConnection.Generation checks. Call resetMedia only after replacement transport attaches; release held input first. New epoch must arrive
+  transport using ScreenConnection.Generation checks. A no-video interval never starts recovery; the two-second
+  timeout applies only to a pending send. Call resetMedia only after replacement transport attaches; release held input first. New epoch must arrive
   before media, and start with init/keyframe. Reject delayed old frames and reset the decoder-relevant counters.
 - [ ] Test overflow, partial-send stall, repeated preparation, old socket finally racing replacement, prepare then hide,
   config disable during retention, unreplaced retention timeout, and three resets within 30 seconds stopping the session.
@@ -561,7 +560,8 @@ end minus video.currentTime when playable, otherwise null; do not fabricate an a
   rejection and destroy during append. When ahead >500 ms request recovery; never drop reference frames or seek through
   arbitrary incomplete media. Only one recovery may be pending at a time.
 - [ ] Test resetting clears queues/object URLs and stale updateend callbacks, invalid MSE/codec shows unsupported and
-  overflow invokes recovery without growing memory. Task 10 uses the stubbed buffer only; Task 11 adds the real
+  overflow invokes recovery without growing memory. Add a 60-second static-desktop case with health but no chunks:
+  the last image remains visible and no recover/unsupported callback fires. Task 10 uses the stubbed buffer only; Task 11 adds the real
   MediaSource decode test after its fixture asset plumbing exists. That test must advance video.currentTime, not merely
   observe append calls. Keep that test in screen-media.spec.js and enable it in Task 11, without merging a skipped test.
 - [ ] Rerun focused tests. Commit: `feat: play bounded screen media in WebView MSE`.
@@ -595,53 +595,57 @@ the Task 9 wrapper and one viewer-scoped callback dispatcher. The demo implement
 - [ ] Implement state UI with textContent, video containment and accessible buttons. Reuse camera's visibility predicate
   but close immediately on page/stack/night/document/app pause and destruction. Add explicit visibilitychange handling;
   update() must not restart a manually stopped, still-visible widget. Send heartbeat every two seconds and playback
-  report at least twice a second only while visible. Unsubscribe/clear timers/base64 data on teardown.
+  report at least twice a second only while visible. A live state/stats heartbeat with no new video keeps the
+  last frame visible; do not label it lost, restart capture or clear MSE just because the stream is damage-driven.
+  Unsubscribe/clear timers/base64 data on teardown.
 - [ ] Add registry options matching the spec, category Computer, icon in WIDGET_ICONS and import in main.js. During the
   mirror milestone, reject extend with an explicit unavailable state until Task 12; do not silently mirror when extend
   was requested. Default remains extend as specified. No default layout receives Screen. Missing bridge shows unsupported.
   Demo script provides real init/media fixtures, a selectable state simulator and fixed inputAvailable=false until Task 13.
   Build.py copies demo-only JS and Task 1 fixture bytes to the built site's fixture directory; never copy test TLS keys.
-- [ ] Test page/stack/night/background/pause cleanup, empty bridge, denied/lost/busy/dependency states, old callbacks,
+- [ ] Before milestone 3 ships, prove real MONITOR capture inside the actual pinned app over USB and bounded slow-
+  consumer recovery; Chrome/demo results cannot satisfy this gate. Record the test phone/WebView and callback overhead.
+  Test page/stack/night/background/pause cleanup, empty bridge, denied/lost/busy/dependency states, old callbacks,
   control-off sends no input, and real MSE fixture playback. Add small/large widget screenshots. Compute actual registry
   count for README, initial GUIDE/SETUP consent/unsupported notes, locales and privacy language; run
   `python3 tools/check-release.py` and focused UI tests. Commit: `feat: add Screen mirror widget and demo`.
 
-## Task 12: Enable extend mode, persistence and monitor reselection
+## Task 12: Enable extend mode and consent-based monitor reselection
 
 **Files:** Modify ScreenFeeds.cs, ScreenEndpoint.cs, helper, screen.js, Screen*Tests.cs and screen.spec.js; extend GUIDE/SETUP.
-**Interfaces:** Existing mode `extend` uses VIRTUAL and mode `mirror` uses MONITOR. Fixed operation
-`{op:"chooseMonitor"}` applies only to the current mirror viewer. ScreenTokenStore.Clear invalidates that scope's lease.
-No new public token fields or capture parameters.
+**Interfaces:** Existing mode `extend` uses VIRTUAL and `mirror` uses MONITOR. Fixed `{op:"chooseMonitor"}` applies only
+to the current mirror viewer and closes/reopens the portal dialog. There is no token store and no persistence probe.
 
-- [ ] Add tests for default extend requesting only VIRTUAL, sequential restart restoring the same scope, control-mode
-  separation, stale token replacement after chooseMonitor, no reselection in extend mode and no token in ToPublic/events.
-  A direct token regression can be:
-  ```csharp
-  [Fact]
-  public void ReselectionRejectsLatePermissionFromPreviousSession() {
-      var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".json");
-      try {
-          var store = new ScreenTokenStore(path);
-          var scope = new ScreenScope("phone", "mirror", false);
-          var consumed = store.Consume(scope);
-          store.Clear(scope);
-          Assert.False(store.Replace(consumed, "late-private-token"));
-          Assert.Null(store.Consume(scope).Token);
-      } finally { File.Delete(path); }
-  }
+- [ ] Add tests for default extend selecting VIRTUAL, fresh approval on each new session, no persistence options,
+  mirror-only reselection and stale callbacks from the replaced session. Python regression:
+  ```python
+  def test_virtual_selection_never_requests_persistence(self):
+      bus = FakeBus()
+      session = helper.PortalSession(bus, lambda event: None)
+      session.start(dict(mode="extend", control=False, fps=15, bitrate=8000000,
+                         cursor="embedded"))
+      bus.complete_create("/session/one")
+      interface, method, args = bus.calls[-1]
+      self.assertEqual(method, "SelectSources")
+      self.assertEqual(args["types"], 4)
+      self.assertNotIn("persist_mode", args)
+      self.assertNotIn("restore_token", args)
   ```
-- [ ] Run Screen token/feed/endpoint tests and focused screen UI tests; confirm the new extend/reselection cases fail first.
-- [ ] Enable VIRTUAL in retained helper startup, with actual negotiated video caps. Wire Choose monitor again through the
-  fixed native screenSend operation, cancel old session first, clear only the current mirror scope and start a fresh
-  portal dialog. Accept unavailable persistence as new approval rather than restoring a different source silently.
-- [ ] Verify repeated real extend start/close/reopen, removal after app/agent death, two phones and one busy second widget,
-  agent restart with stored tokens, output arrangement behavior and ≤1080p mirror downscaling. Record results in the
-  findings document without token values; update placement/consent docs to match observed KDE behavior.
-- [ ] Rerun unit/UI checks; commit: `feat: extend the KDE desktop onto the paired phone`.
+  FakeBus records each call as `(interface, method, options)` as established in Task 4; adapt its successful Start
+  response to count approvals. Unexpected token-like fields must be absent from public events and disk writes.
+- [ ] Run Screen feed/endpoint tests, helper Python tests and focused UI tests; confirm new extend/reselection cases fail first.
+- [ ] Enable VIRTUAL with actual negotiated caps. Wire Choose monitor again through the fixed native screenSend
+  operation; cancel the old session before a fresh consent dialog. No automatic restart of a lost portal session.
+  Reset media in an existing retained session without re-approval; a failed retention reports lost and offers Retry.
+- [ ] Gate milestone 4 on real VIRTUAL playback in the actual pinned app, repeated session approval/close, app/agent
+  death cleanup, two phones and same-phone contention, placement, and a working 15 fps openh264enc run. Record CPU
+  and playback at both 15/30 fps without claiming hardware encoding or glass-to-glass latency. Update consent/placement docs.
+- [ ] Rerun focused tests. Commit: `feat: extend the KDE desktop with per-session consent`.
 
 ## Task 13: Add absolute pointer only for proven mappings
 
-**Gate:** Execute only if Task 0 proves a usable logical mapping and input API for the shipping source/compositor.
+**Gate:** Start this milestone with the real input/mapping experiment now that capture and transport exist.
+Enable pointer forwarding only after it proves a usable logical mapping and input API for the shipping source/compositor.
 Otherwise add the live-video/control-unavailable UI coverage and documentation, keep inputAvailable=false and omit pointer forwarding.
 **Files:** Create screen-input.js, `tools/ui-tests/screen-input.spec.js`, `ScreenInputTests.cs`; modify helper,
 ScreenFeeds.cs, screen.js and GUIDE. Extend Python tests for permission/mapping and releaseAll.
@@ -653,7 +657,7 @@ export function bindScreenInput(surface, { dimensions, enabled, send }) {}
 // Return { releaseAll(), destroy() }; dimensions() returns {width,height}.
 ```
 Agent-side `ScreenFeeds.InputAsync(connection, json, ct)` from Task 6 accepts only pointer/button/scroll/releaseAll messages. Helper maintains
-pressed-button state and uses stream-local logical extents from the proven Task 0 mapping. Never substitute desktop
+pressed-button state and uses stream-local logical extents proven by this milestone’s input experiment. Never substitute desktop
 pixel positions or use ydotool. InputAvailable is true only after both permission and mapping validation.
 
 - [ ] Add contained-video and gesture tests, starting with:
@@ -715,8 +719,10 @@ must fail without blocking normal agent startup. No unattended package installat
   From `tools/ui-tests`: `npm ci`, `npx playwright install chromium`, `npx playwright test`.
   From `android`: `./gradlew testDebugUnitTest lintDebug assembleDebug` and `./gradlew connectedDebugAndroidTest`.
   Use normal dependency/download permission flow when required. Repeat only failed checks or checks affected by subsequent changes.
-- [ ] Complete and record spec §5.9's hardware matrix: both routes, two phones, same-phone contention, HiDPI/rotation,
-  output placement, app/agent/portal loss, token revocation and denial, ten-minute thermal/performance measurements and
+- [ ] Gate release on actual app Wi-Fi capture and glass-to-glass measurements; buffer-ahead is not a substitute.
+  Confirm bitrate/scene complexity during throughput measurements; the spike’s near-static 1.3 MB run did not
+  establish sustained 8 Mbit/s capacity. Complete and record spec §5.9's hardware matrix: both routes, two phones, same-phone contention, HiDPI/rotation,
+  output placement, app/agent/portal loss, per-session consent and denial, ten-minute thermal/performance measurements and
   throttling recovery. Verify Linux release publish embeds the helper; macOS/Windows build smoke checks on their CI
   runners show unsupported with no capture helper startup. Test UI without native bridge and on the oldest available
   supported WebView. Document untested devices and blocked checks explicitly, never report them as passes.
@@ -732,10 +738,11 @@ must fail without blocking normal agent startup. No unattended package installat
 | G3 input permission, logical mapping and release | 0, 6, 7, 13 |
 | G4 pairing/routes/native boundary | 7, 8, 9 |
 | G5 encoder/MSE/latency/congestion | 0, 1, 5, 7, 8, 10, 14 |
-| G6 ownership, token rotation, visibility, shutdown/retry | 3, 4, 5, 6, 7, 9, 11, 12 |
+| G6 ownership, per-session consent, visibility, shutdown/retry | 3, 4, 5, 6, 7, 9, 11, 12 |
 | G7 portability, failure states and API floor | 5, 9, 11, 14 |
 | Packaging, registry/counts, docs and privacy | 11, 12, 14 |
 | Unit/fake-helper/UI/instrumentation/manual verification | Every task; final matrix in 14 |
 
-No product code is implemented by writing this plan. The next executable action is Task 0, followed by its evidence review.
+No product code is implemented by this document revision. The reduced Task 0 findings are recorded; the next
+implementation task is Task 1. Persistence is deliberately outside this plan, not unfinished release work.
 Execution may be inline with executing-plans or delegated with subagent-driven-development only when the user selects it.
