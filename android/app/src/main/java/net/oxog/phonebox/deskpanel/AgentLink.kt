@@ -720,6 +720,12 @@ class AgentLink(private val context: Context) {
         return SSLContext.getInstance("TLS").apply { init(null, arrayOf(tm), SecureRandom()) }.socketFactory
     }
 
+    internal fun usbPinInternal(): String? = UsbKey.pin(context)
+    internal fun usbBearerInternal(): String? = UsbKey.pin(context)?.let { UsbKey.get(context) }
+    internal fun usbPinnedFactoryInternal(pin: String): SSLSocketFactory? = try {
+        usbFactory?.takeIf { it.first == pin }?.second ?: pinnedFactory(pin).also { usbFactory = pin to it }
+    } catch (_: Exception) { null }
+
     companion object {
         // Android pools HTTPS connections by the hostname verifier as well as the socket factory: a new lambda per
         // request means no reuse, and on Android 6 each new TLS connection costs descriptors until the app is killed

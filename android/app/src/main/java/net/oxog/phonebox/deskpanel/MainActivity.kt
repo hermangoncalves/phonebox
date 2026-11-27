@@ -78,6 +78,16 @@ class MainActivity : Activity(), SensorEventListener {
     private var destroyed = false
     private val dictation by lazy { Dictation(this) { script -> if (!destroyed) web.evaluateJavascript(script, null) } }
     private lateinit var link: AgentLink
+    private val screenSocket by lazy {
+        ScreenSocket(link) { viewer, event, b64 ->
+            runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                val e = JSONObject.quote(event)
+                val b = if (b64 == null) "null" else JSONObject.quote(b64)
+                web.evaluateJavascript("window.__phoneboxScreen && window.__phoneboxScreen($viewer,$e,$b)", null)
+            }
+        }
+    }
     private lateinit var stream: AgentStream
     @Volatile private var resumed = false
     @Volatile private var volumeKeysFlipPages = true
@@ -702,6 +712,7 @@ class MainActivity : Activity(), SensorEventListener {
         sensors?.unregisterListener(this)
         stream.stop()
         link.trackpadSocket.close()
+        screenSocket.closeAll()
         link.close()
         if (hasWeb) {
             (web.parent as? ViewGroup)?.removeView(web) // a WebView must be detached before destroy()
@@ -992,6 +1003,39 @@ class MainActivity : Activity(), SensorEventListener {
 
         @JavascriptInterface
         fun cancelListening(key: String, id: Int) { if (ok(key) && id > 0) dictation.cancel(id) }
+
+        @JavascriptInterface
+        fun screenOpen(key: String, widget: String, viewer: Long) {
+            if (!ok(key)) return
+            val w = widget.take(200)
+            if (w.isEmpty() || viewer <= 0) return
+            screenSocket.open(w, viewer)
+        }
+
+        @JavascriptInterface
+        fun screenClose(key: String, viewer: Long) {
+            if (!ok(key) || viewer <= 0) return
+            screenSocket.close(viewer)
+        }
+
+        @JavascriptInterface
+        fun screenSend(key: String, viewer: Long, message: String) {
+            if (!ok(key) || viewer <= 0) return
+            val m = if (message.length > 4096) return else message
+            screenSocket.send(viewer, m)
+        }
+
+        @JavascriptInterface
+        fun screenAck(key: String, viewer: Long, epoch: Long, sequence: Long) {
+            if (!ok(key) || viewer <= 0) return
+            screenSocket.acknowledge(viewer, epoch, sequence)
+        }
+
+        @JavascriptInterface
+        fun screenRecover(key: String, viewer: Long) {
+            if (!ok(key) || viewer <= 0) return
+            screenSocket.recover(viewer)
+        }
     }
 
     companion object {
