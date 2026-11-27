@@ -183,9 +183,38 @@ class GioPortalBus:  # pragma: no cover - requires Gio
         pass
 
 
-def main(argv=None):
-    # Production entry point (not exercised by unit tests).
-    return 0
+def build_pipeline(fd, node, options):
+    """Return a gst-launch-style pipeline description. Requires Gst."""
+    if not _HAVE_GIO:
+        raise RuntimeError("Gio/Gst not available")
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    fps = int(options.get("fps", 30))
+    bitrate = int(options.get("bitrate", 8000000))
+    # probe encoder
+    encoder = None
+    for cand in ("vah264enc", "openh264enc", "x264enc"):
+        try:
+            f = Gst.ElementFactory.find(cand)
+            if f is not None:
+                encoder = cand
+                break
+        except Exception:
+            continue
+    if encoder is None:
+        raise RuntimeError("no H.264 encoder")
+    if encoder == "openh264enc":
+        enc_props = "bitrate=%d complexity=1 rate-control=bitrate gop-size=%d" % (bitrate, fps)
+    elif encoder == "x264enc":
+        enc_props = "bitrate=%d tune=zerolatency key-int-max=%d" % (bitrate // 1000, fps)
+    else:
+        enc_props = "bitrate=%d" % (bitrate // 1000)
+    return ("pipewiresrc fd=%d path=%s do-timestamp=true ! queue max-size-buffers=2 leaky=downstream "
+            "! videoconvert ! videorate ! video/x-raw,framerate=%d/1 "
+            "! %s %s ! h264parse config-interval=-1 ! mp4mux streamable=true fragment-duration=100 "
+            "! appsink emit-signals=true sync=false" % (fd, node, fps, encoder, enc_props))
 
 
 if __name__ == "__main__":
