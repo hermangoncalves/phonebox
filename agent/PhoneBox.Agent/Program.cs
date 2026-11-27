@@ -284,6 +284,7 @@ app.UseRouting();
 app.Use(gate.InvokeAsync);
 
 app.Map("/api/trackpad", TrackpadHandler.HandleEndpoint);
+app.Map("/api/screen", ScreenEndpoint.HandleAsync);
 
 // ---------------------------------------------------------------- Wi-Fi pairing (local / USB only)
 // The phone calls this through the USB tunnel and stores everything it needs to connect over Wi-Fi.

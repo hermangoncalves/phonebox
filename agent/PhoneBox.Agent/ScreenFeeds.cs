@@ -29,6 +29,8 @@ internal sealed class ScreenFeeds : IAsyncDisposable
         public int InputCount;
         public int RetryAttempt;
         public bool Closed;
+        public bool RecoveryRetention;
+        public long RecoveryDeadlineMs;
     }
 
     public ScreenFeeds(ConfigStore config, ScreenLauncher launcher, Func<long> nowMs)
@@ -285,6 +287,33 @@ internal sealed class ScreenFeeds : IAsyncDisposable
         3 => TimeSpan.FromSeconds(8),
         _ => TimeSpan.FromSeconds(30),
     };
+
+    public Task<bool> PrepareRecoveryAsync(ScreenViewer viewer)
+    {
+        lock (_gate)
+        {
+            if (!_byDevice.TryGetValue(viewer.Device, out var conn)) return Task.FromResult(false);
+            if (conn.Viewer.Handle != viewer.Handle) return Task.FromResult(false);
+            if (!_byGeneration.TryGetValue(conn.Generation, out var st) || st.Closed) return Task.FromResult(false);
+            if (st.Lease.Viewer != viewer.Handle) return Task.FromResult(false);
+            st.RecoveryRetention = true;
+            st.RecoveryDeadlineMs = _nowMs() + 10_000;
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task ResetMediaAsync(ScreenViewer viewer)
+    {
+        lock (_gate)
+        {
+            if (_byDevice.TryGetValue(viewer.Device, out var conn) && conn.Viewer.Handle == viewer.Handle
+                && _byGeneration.TryGetValue(conn.Generation, out var st))
+            {
+                st.RecoveryRetention = false;
+            }
+        }
+        return Task.CompletedTask;
+    }
 
     public async ValueTask DisposeAsync()
     {
