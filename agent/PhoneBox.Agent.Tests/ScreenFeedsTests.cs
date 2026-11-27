@@ -15,7 +15,7 @@ internal sealed class ScreenFeedsTestRig : IAsyncDisposable
     public ConfigStore Store { get; }
     public ScreenFeeds Feeds { get; }
     public long NowMs { get; set; }
-    public List<FakeScreenRun> Runs { get; } = new();
+    public List<FakeScreenRun> Runs { get; private set; } = new();
     private readonly string _dir;
 
     private ScreenFeedsTestRig(string dir, ConfigStore store, ScreenFeeds feeds)
@@ -59,7 +59,7 @@ internal sealed class ScreenFeedsTestRig : IAsyncDisposable
     private ScreenFeedsTestRig(string dir, ConfigStore store, ScreenFeeds feeds, List<FakeScreenRun> runs)
         : this(dir, store, feeds)
     {
-        Runs.AddRange(runs);
+        Runs = runs;
     }
 
     public async ValueTask DisposeAsync()

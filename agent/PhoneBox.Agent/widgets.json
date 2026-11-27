@@ -4170,7 +4170,7 @@
   "category": "Computer",
   "name": "Screen",
   "icon": "🖥️",
-  "desc": "Show a Linux virtual monitor in the panel.",
+  "desc": "Turn the phone into a Linux monitor (extend or mirror).",
   "w": 6,
   "h": 6,
   "minW": 3,
@@ -4180,7 +4180,79 @@
     "key": "mode",
     "label": "What to show",
     "type": "select",
-    "default": "extend"
+    "default": "extend",
+    "choices": [
+     {
+      "value": "extend",
+      "label": "Extend desktop"
+     },
+     {
+      "value": "mirror",
+      "label": "Mirror display"
+     }
+    ]
+   },
+   {
+    "key": "fps",
+    "label": "Frame rate",
+    "type": "select",
+    "default": "30",
+    "choices": [
+     {
+      "value": "10",
+      "label": "10 fps"
+     },
+     {
+      "value": "15",
+      "label": "15 fps"
+     },
+     {
+      "value": "30",
+      "label": "30 fps"
+     }
+    ]
+   },
+   {
+    "key": "quality",
+    "label": "Quality",
+    "type": "select",
+    "default": "medium",
+    "choices": [
+     {
+      "value": "low",
+      "label": "Low (4 Mbps)"
+     },
+     {
+      "value": "medium",
+      "label": "Medium (8 Mbps)"
+     },
+     {
+      "value": "high",
+      "label": "High (16 Mbps)"
+     }
+    ]
+   },
+   {
+    "key": "cursor",
+    "label": "Cursor",
+    "type": "select",
+    "default": "embedded",
+    "choices": [
+     {
+      "value": "embedded",
+      "label": "Embedded"
+     },
+     {
+      "value": "hidden",
+      "label": "Hidden"
+     }
+    ]
+   },
+   {
+    "key": "control",
+    "label": "Touch control",
+    "type": "bool",
+    "default": false
    }
   ]
  }

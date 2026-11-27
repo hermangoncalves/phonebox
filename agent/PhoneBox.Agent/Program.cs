@@ -131,6 +131,13 @@ AddMonitor<OpenCodeApprovals>(builder.Services);
 AddMonitor<FeedMonitor>(builder.Services);
 builder.Services.AddSingleton<PhotoFrame>();
 builder.Services.AddSingleton<CameraFeeds>();
+builder.Services.AddSingleton(sp => new ScreenFeeds(
+    sp.GetRequiredService<ConfigStore>(),
+    (opts, receive, ct) => ScreenCast.StartAsync(
+        Path.Combine(AppContext.BaseDirectory, "Linux", "phonebox-screencast.py"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhoneBox", "screen-runtime"),
+        opts, receive, ct),
+    () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
 AddMonitor<GitHubMonitor>(builder.Services);
 AddMonitor<PingMonitor>(builder.Services);
 AddMonitor<AdbReverse>(builder.Services);
@@ -418,7 +425,7 @@ app.MapGet("/api/settings", (HttpRequest req, ConfigStore cfg, HttpResponse res)
     return Results.Text(json, "application/json; charset=utf-8");
 });
 
-app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ControlDeck deck, PhotoFrame photos, CameraFeeds cameras, ShortcutIconUploads icons, ILogger<Program> log, CancellationToken ct) =>
+app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ControlDeck deck, PhotoFrame photos, CameraFeeds cameras, ScreenFeeds screens, ShortcutIconUploads icons, ILogger<Program> log, CancellationToken ct) =>
 {
     if (req.ContentType?.StartsWith("application/json") != true) return Results.StatusCode(415);
     using var r = new StreamReader(req.Body);
@@ -461,6 +468,7 @@ app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ControlDeck
     deck.StopDisabledControls();
     photos.SettingsSaved();
     cameras.SettingsSaved();
+    await screens.SettingsSavedAsync();
     deck.ReconcileRadios(waitForGate: true);
     icons.Cleanup(() => cfg.Get().Shortcuts.Select(s => s.Id)); // drop uploads for shortcuts that got deleted
     ShortcutIcons.ClearHasIconCache();
