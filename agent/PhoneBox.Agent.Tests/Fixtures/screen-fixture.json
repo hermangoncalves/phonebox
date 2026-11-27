@@ -1,0 +1,19 @@
+{
+  "codec": "avc1.42C028",
+  "profile": "Constrained Baseline",
+  "level": "4.0",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "container": "fragmented MP4 (ISO BMFF)",
+  "boxes": {
+    "init": "ftyp, moov",
+    "media": "moof, mdat"
+  },
+  "generation": "gst-launch-1.0 -q videotestsrc pattern=ball num-buffers=60 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! openh264enc bitrate=8000000 complexity=1 rate-control=bitrate gop-size=30 ! h264parse config-interval=-1 ! mp4mux streamable=true fragment-duration=100 ! filesink location=raw.mp4",
+  "license": "Synthetic pattern generated locally; no desktop content.",
+  "digests": {
+    "screen-init.mp4": "fe7964ca96b7771b166b9b501678787a77f408adc67218b1dd8490d898ae7f32",
+    "screen-media.m4s": "44a61de0cb0ad415e60d34cdfc59a816a05573d5e6a5fcbb8386bfb0dedaaab7"
+  }
+}
